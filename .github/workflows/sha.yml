@@ -1,0 +1,58 @@
+# Workflow to generate SHA checksums for all files in the repository
+# This creates a checksums.txt file that can be used for verification
+
+name: Generate SHA Checksums
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  generate-sha:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Generate SHA256 checksums for all files
+        run: |
+          # Generate checksums for all files except .git directory
+          find . -type f -not -path "./.git/*" -not -path "./node_modules/*" -not -path "./.github/*" | sort | xargs sha256sum > checksums.txt
+          
+          # Also generate a JSON format for better parsing
+          echo "{" > checksums.json
+          find . -type f -not -path "./.git/*" -not -path "./node_modules/*" -not -path "./.github/*" | sort | while read file; do
+            sha=$(sha256sum "$file" | cut -d' ' -f1)
+            echo "  \"${file#./}\": \"$sha\"," >> checksums.json
+          done
+          # Remove trailing comma and close JSON
+          sed -i '$ s/,$//' checksums.json
+          echo "}" >> checksums.json
+          
+      - name: Upload checksums as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha-checksums
+          path: |
+            checksums.txt
+            checksums.json
+          
+      - name: Display checksums
+        run: |
+          echo "Generated SHA256 checksums:"
+          cat checksums.txt
+          
+      - name: Upload to release (if release)
+        if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./checksums.txt
+          asset_name: checksums.txt
+          asset_content_type: text/plain
