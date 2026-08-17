@@ -17,12 +17,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'  # Use Node.js 22 LTS or 24
+          
       - name: Generate SHA256 checksums
         run: |
           echo "{" > sha.json
           find . -type f -not -path "./.git/*" -not -path "./node_modules/*" -not -path "./.github/*" | sort | while read file; do
             sha=$(sha256sum "$file" | cut -d' ' -f1)
-            echo "  \"${file#./}\": \"$sha\"," >> sha.json
+            # Escape special characters in filename for JSON
+            safe_file=$(echo "$file" | sed 's/^\.\///' | sed 's/"/\\"/g')
+            echo "  \"$safe_file\": \"$sha\"," >> sha.json
           done
           # Remove trailing comma and close JSON
           sed -i '$ s/,$//' sha.json
