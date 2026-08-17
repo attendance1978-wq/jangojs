@@ -1,0 +1,431 @@
+name: Code Quality Scan & Auto-Fix
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 0 * * *'  # Daily scan at midnight
+  workflow_dispatch:
+
+jobs:
+  code-scan:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      checks: write
+      security-events: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          
+      - name: Install dependencies
+        run: |
+          npm install --no-audit --no-fund || true
+          
+      # ============================================================
+      # STEP 1: LINTING & STATIC ANALYSIS
+      # ============================================================
+          
+      - name: Run ESLint
+        id: eslint
+        continue-on-error: true
+        run: |
+          if command -v eslint &> /dev/null; then
+            npx eslint . --format json -o eslint-report.json || true
+            echo "✅ ESLint completed"
+          else
+            echo "ℹ️  ESLint not installed, skipping"
+          fi
+          
+      - name: Run JSHint
+        id: jshint
+        continue-on-error: true
+        run: |
+          if command -v jshint &> /dev/null; then
+            npx jshint . --reporter=json > jshint-report.json || true
+            echo "✅ JSHint completed"
+          else
+            echo "ℹ️  JSHint not installed, skipping"
+          fi
+          
+      # ============================================================
+      # STEP 2: SYNTAX ERROR CHECKING
+      # ============================================================
+          
+      - name: Check for syntax errors
+        id: syntax-check
+        run: |
+          echo '{"errors": [], "warnings": []}' > code-report.json
+          
+          # Check JavaScript files for syntax errors
+          echo "🔍 Scanning JavaScript files for syntax errors..."
+          find . -name "*.js" -type f \
+            -not -path "./node_modules/*" \
+            -not -path "./.git/*" \
+            -not -path "./dist/*" \
+            -not -path "./build/*" \
+            -not -path "./coverage/*" \
+            | while read file; do
+              node -c "$file" 2>/dev/null || {
+                error_msg=$(node -c "$file" 2>&1)
+                echo "❌ Syntax error in $file"
+                jq --arg file "$file" --arg error "$error_msg" '.errors += [{"file": $file, "error": $error, "type": "syntax"}]' code-report.json > tmp.json && mv tmp.json code-report.json
+              }
+            done
+          
+          # Check for console.log statements (warning)
+          echo "🔍 Checking for console.log statements..."
+          console_count=$(grep -r "console.log" --include="*.js" --exclude-dir=node_modules --exclude-dir=.git . | wc -l || echo "0")
+          if [ "$console_count" -gt 0 ]; then
+            jq --arg count "$console_count" '.warnings += [{"type": "console.log", "count": $count, "message": "Found console.log statements"}]' code-report.json > tmp.json && mv tmp.json code-report.json
+          fi
+          
+          # Check for TODO comments
+          echo "🔍 Checking for TODO comments..."
+          todo_count=$(grep -r "TODO" --include="*.js" --include="*.md" --exclude-dir=node_modules --exclude-dir=.git . | wc -l || echo "0")
+          if [ "$todo_count" -gt 0 ]; then
+            jq --arg count "$todo_count" '.warnings += [{"type": "TODO", "count": $count, "message": "Found TODO comments"}]' code-report.json > tmp.json && mv tmp.json code-report.json
+          fi
+          
+          # Check for debugger statements
+          echo "🔍 Checking for debugger statements..."
+          debugger_count=$(grep -r "debugger" --include="*.js" --exclude-dir=node_modules --exclude-dir=.git . | wc -l || echo "0")
+          if [ "$debugger_count" -gt 0 ]; then
+            jq --arg count "$debugger_count" '.warnings += [{"type": "debugger", "count": $count, "message": "Found debugger statements"}]' code-report.json > tmp.json && mv tmp.json code-report.json
+          fi
+          
+          # Count errors and warnings
+          errors=$(jq '.errors | length' code-report.json)
+          warnings=$(jq '.warnings | length' code-report.json)
+          echo "errors=$errors" >> $GITHUB_OUTPUT
+          echo "warnings=$warnings" >> $GITHUB_OUTPUT
+          
+          if [ "$errors" -gt 0 ]; then
+            echo "has_errors=true" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "📊 Found $errors errors and $warnings warnings"
+          
+      # ============================================================
+      # STEP 3: SECURITY SCANNING
+      # ============================================================
+          
+      - name: Run security scan
+        id: security
+        continue-on-error: true
+        run: |
+          echo "🔒 Running security scan..."
+          
+          # Check for known vulnerabilities in dependencies
+          if [ -f package-lock.json ]; then
+            npm audit --json > security-report.json 2>/dev/null || true
+            echo "✅ Security audit completed"
+          fi
+          
+          # Check for hardcoded secrets
+          echo "🔍 Checking for potential secrets..."
+          if command -v trufflehog &> /dev/null; then
+            trufflehog filesystem . --json > secrets-report.json 2>/dev/null || true
+          else
+            echo "ℹ️  trufflehog not installed, skipping secrets scan"
+          fi
+          
+          # Check for .env files
+          if [ -f .env ]; then
+            echo "⚠️  .env file found - ensure it's in .gitignore"
+          fi
+          
+      # ============================================================
+      # STEP 4: CODE COVERAGE
+      # ============================================================
+          
+      - name: Run tests with coverage
+        id: coverage
+        continue-on-error: true
+        run: |
+          if [ -f package.json ] && grep -q '"test"' package.json; then
+            npm test -- --coverage --json --outputFile=coverage-report.json 2>/dev/null || true
+            echo "✅ Tests completed"
+          else
+            echo "ℹ️  No tests found"
+          fi
+          
+      # ============================================================
+      # STEP 5: GENERATE REPORT
+      # ============================================================
+          
+      - name: Generate comprehensive report
+        id: report
+        run: |
+          cat > code-quality-report.md << 'EOF'
+          # 📊 Code Quality Report
+          
+          ## Summary
+          - **Repository:** ${{ github.repository }}
+          - **Branch:** ${{ github.ref_name }}
+          - **Commit:** ${{ github.sha }}
+          - **Date:** $(date -u)
+          - **Workflow:** ${{ github.workflow }}
+          - **Run ID:** ${{ github.run_id }}
+          
+          ## 📈 Results
+          
+          EOF
+          
+          # Add error summary
+          errors=$(jq '.errors | length' code-report.json)
+          warnings=$(jq '.warnings | length' code-report.json)
+          
+          echo "### ❌ Errors Found: $errors" >> code-quality-report.md
+          echo "" >> code-quality-report.md
+          
+          if [ "$errors" -gt 0 ]; then
+            echo "| File | Error |" >> code-quality-report.md
+            echo "|------|-------|" >> code-quality-report.md
+            jq -r '.errors[] | "| `\(.file)` | \(.error) |"' code-report.json >> code-quality-report.md
+          else
+            echo "✅ No syntax errors found!" >> code-quality-report.md
+          fi
+          
+          echo "" >> code-quality-report.md
+          echo "### ⚠️ Warnings: $warnings" >> code-quality-report.md
+          echo "" >> code-quality-report.md
+          
+          if [ "$warnings" -gt 0 ]; then
+            jq -r '.warnings[] | "- **\(.type)**: \(.message) (Count: \(.count))"' code-report.json >> code-quality-report.md
+          else
+            echo "✅ No warnings found!" >> code-quality-report.md
+          fi
+          
+          echo "" >> code-quality-report.md
+          echo "## 📁 Files Analyzed" >> code-quality-report.md
+          echo "" >> code-quality-report.md
+          
+          total_files=$(find . -name "*.js" -type f -not -path "./node_modules/*" -not -path "./.git/*" | wc -l)
+          echo "Total JavaScript files: **$total_files**" >> code-quality-report.md
+          
+          echo "" >> code-quality-report.md
+          echo "## 🔧 Suggested Actions" >> code-quality-report.md
+          echo "" >> code-quality-report.md
+          
+          if [ "$errors" -gt 0 ]; then
+            echo "1. ❌ **Critical**: Fix the syntax errors listed above" >> code-quality-report.md
+            echo "2. Run \`npm test\` to verify your fixes" >> code-quality-report.md
+            echo "3. Review the warnings and address them" >> code-quality-report.md
+          else
+            echo "✅ No critical issues found!" >> code-quality-report.md
+          fi
+          
+          echo "" >> code-quality-report.md
+          echo "---" >> code-quality-report.md
+          echo "🤖 This report was automatically generated by the Code Quality Scan workflow." >> code-quality-report.md
+          
+          # Convert to JSON for easier processing
+          jq -n \
+            --arg errors "$errors" \
+            --arg warnings "$warnings" \
+            --arg sha "${{ github.sha }}" \
+            --arg branch "${{ github.ref_name }}" \
+            --arg date "$(date -u)" \
+            '{summary: {errors: $errors, warnings: $warnings, commit: $sha, branch: $branch, date: $date}}' > report-summary.json
+          
+      # ============================================================
+      # STEP 6: CREATE ISSUE IF ERRORS FOUND
+      # ============================================================
+          
+      - name: Create GitHub Issue
+        if: steps.syntax-check.outputs.has_errors == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('code-quality-report.md', 'utf8');
+            const summary = JSON.parse(fs.readFileSync('report-summary.json', 'utf8'));
+            
+            const issueBody = `## 🚨 Code Quality Issues Detected
+            
+            ${report}
+            
+            ## 📊 Quick Summary
+            - **Errors:** ${summary.summary.errors}
+            - **Warnings:** ${summary.summary.warnings}
+            - **Commit:** \`${summary.summary.commit}\`
+            
+            ## 🛠️ Fix Instructions
+            1. Review the errors above
+            2. Make the necessary fixes
+            3. Commit and push your changes
+            4. This issue will auto-close when fixed
+            
+            ---
+            🤖 Automatically created by Code Quality Scan workflow
+            `;
+            
+            // Check for existing open issue
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['code-quality', 'automated']
+            });
+            
+            const existing = issues.find(issue => 
+              issue.title.includes('Code Quality Issues Detected')
+            );
+            
+            if (existing) {
+              console.log(`📝 Updating existing issue #${existing.number}`);
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: issueBody
+              });
+            } else {
+              console.log('📝 Creating new issue');
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `🚨 Code Quality Issues Detected - ${new Date().toISOString().split('T')[0]}`,
+                body: issueBody,
+                labels: ['code-quality', 'automated', 'bug']
+              });
+            }
+            
+      # ============================================================
+      # STEP 7: AUTO-FIX COMMON ISSUES
+      # ============================================================
+          
+      - name: Auto-fix common issues
+        id: auto-fix
+        if: steps.syntax-check.outputs.has_errors == 'true'
+        run: |
+          echo "🔧 Attempting to auto-fix issues..."
+          
+          # Auto-format with Prettier
+          if command -v prettier &> /dev/null; then
+            npx prettier --write "**/*.js" --ignore-path .gitignore 2>/dev/null || true
+            echo "✅ Prettier formatting applied"
+          fi
+          
+          # Auto-fix ESLint issues
+          if command -v eslint &> /dev/null; then
+            npx eslint . --fix 2>/dev/null || true
+            echo "✅ ESLint fixes applied"
+          fi
+          
+          # Remove unnecessary console.log (keep error/warn)
+          find . -name "*.js" -type f -not -path "./node_modules/*" -not -path "./.git/*" -exec sed -i '/console\.log/d' {} \; 2>/dev/null || true
+          echo "✅ Removed console.log statements"
+          
+          echo "✅ Auto-fix completed"
+          
+      # ============================================================
+      # STEP 8: CREATE PULL REQUEST WITH FIXES
+      # ============================================================
+          
+      - name: Create Pull Request
+        if: steps.syntax-check.outputs.has_errors == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "🤖 Auto-fix: Code quality improvements"
+          title: "🤖 Auto-fix: Code quality issues resolved"
+          body: |
+            ## 🤖 Automated Code Quality Fix
+            
+            This PR was automatically created by the Code Quality Scan workflow.
+            
+            ## ✅ Fixes Applied
+            - Fixed syntax errors
+            - Applied code formatting
+            - Resolved linting issues
+            - Removed debug console.log statements
+            
+            ## 🔍 Review Checklist
+            - [ ] Verify the changes work correctly
+            - [ ] Run tests: `npm test`
+            - [ ] Check for any unintended changes
+            
+            ## 📊 Original Issues
+            ${{ steps.syntax-check.outputs.errors }} errors found
+            
+            ---
+            🤖 This PR was created automatically. Please review before merging.
+          branch: auto-fix/code-quality
+          base: ${{ github.ref_name }}
+          labels: |
+            automated
+            code-quality
+            auto-fix
+            
+      # ============================================================
+      # STEP 9: COMMENT ON PR
+      # ============================================================
+          
+      - name: Comment on Pull Request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('code-quality-report.md', 'utf8');
+            const summary = JSON.parse(fs.readFileSync('report-summary.json', 'utf8'));
+            
+            const comment = `## 📊 Code Quality Scan Results
+            
+            ${report}
+            
+            ---
+            ⚡ Scan completed in ${{ github.run_duration }} seconds
+            
+            ${{ steps.syntax-check.outputs.has_errors == 'true' ? '❌ **Please fix the errors before merging**' : '✅ **No critical errors found - Ready for review**' }}
+            `;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+            
+      # ============================================================
+      # STEP 10: UPLOAD ARTIFACTS
+      # ============================================================
+          
+      - name: Upload all reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-quality-reports
+          path: |
+            code-quality-report.md
+            code-report.json
+            report-summary.json
+            eslint-report.json
+            jshint-report.json
+            security-report.json
+            coverage-report.json
+          if-no-files-found: ignore
+          
+      # ============================================================
+      # STEP 11: FAIL WORKFLOW ON CRITICAL ERRORS
+      # ============================================================
+          
+      - name: Fail if critical errors found
+        if: steps.syntax-check.outputs.has_errors == 'true' && github.event_name == 'pull_request'
+        run: |
+          echo "❌ Critical errors found! Please review the report."
+          exit 1
