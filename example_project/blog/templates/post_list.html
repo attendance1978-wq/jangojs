@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Posts — jangojs blog{% endblock %}
+{% block content %}
+  <p><a href="/posts/new/">+ new post</a></p>
+  {% if posts %}
+    {% for post in posts %}
+      <div class="post">
+        <h2><a href="/posts/{{ post.id }}/">{{ post.title }}</a></h2>
+        <p>{{ post.createdAt }}</p>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p>No posts yet.</p>
+  {% endif %}
+{% endblock %}

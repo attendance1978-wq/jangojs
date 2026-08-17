@@ -1,0 +1,15 @@
+{
+  "name": "jangojs",
+  "version": "0.2.0",
+  "description": "A Django-shaped backend web framework for Node.js: models/ORM, urlpatterns, views, a template language, and a bare-bones admin — pure JavaScript, zero dependencies, zero native bindings (flat-file JSON storage, no SQL engine).",
+  "main": "core/index.js",
+  "bin": {
+    "jangojs-admin": "./bin/manage.js"
+  },
+  "keywords": ["framework", "django", "mvc", "orm", "backend"],
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "example": "cd example_project && node ../bin/manage.js runserver"
+  }
+}
