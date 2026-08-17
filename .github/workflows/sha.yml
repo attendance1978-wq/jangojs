@@ -16,38 +16,61 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        
-      - name: Setup Node.js
+        with:
+          # Better compatibility with newer Node.js
+          fetch-depth: 1
+          
+      - name: Setup Node.js (Latest LTS)
         uses: actions/setup-node@v4
         with:
-          node-version: '22'  # Use Node.js 22 LTS or 24
+          node-version: 'lts/*'
           
       - name: Generate SHA256 checksums
+        id: generate
         run: |
-          echo "{" > sha.json
-          find . -type f -not -path "./.git/*" -not -path "./node_modules/*" -not -path "./.github/*" | sort | while read file; do
+          # Create JSON with proper escaping
+          echo '{' > sha.json
+          first=true
+          find . -type f -not -path "./.git/*" -not -path "./node_modules/*" -not -path "./.github/*" -not -path "./.vscode/*" | sort | while read file; do
             sha=$(sha256sum "$file" | cut -d' ' -f1)
-            # Escape special characters in filename for JSON
-            safe_file=$(echo "$file" | sed 's/^\.\///' | sed 's/"/\\"/g')
-            echo "  \"$safe_file\": \"$sha\"," >> sha.json
+            # Remove leading ./
+            safe_file="${file#./}"
+            # Escape backslashes and quotes for JSON
+            safe_file=$(printf '%s' "$safe_file" | sed 's/\\/\\\\/g' | sed 's/"/\\"/g')
+            if [ "$first" = true ]; then
+              echo "  \"$safe_file\": \"$sha\"" >> sha.json
+              first=false
+            else
+              echo ", \"$safe_file\": \"$sha\"" >> sha.json
+            fi
           done
-          # Remove trailing comma and close JSON
-          sed -i '$ s/,$//' sha.json
-          echo "}" >> sha.json
+          echo '}' >> sha.json
+          
+          echo "Generated sha.json with $(jq '. | length' sha.json) entries"
+          
+      - name: Validate JSON
+        run: |
+          if jq empty sha.json 2>/dev/null; then
+            echo "✅ JSON is valid"
+          else
+            echo "❌ JSON is invalid"
+            jq . sha.json
+            exit 1
+          fi
           
       - name: Upload SHA JSON
         uses: actions/upload-artifact@v4
         with:
           name: sha-checksums
           path: sha.json
+          if-no-files-found: error
           
       - name: Attach to release
         if: github.event_name == 'release'
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v1
         with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./sha.json
-          asset_name: sha.json
-          asset_content_type: application/json
+          files: sha.json
+          append_body: true
+          body: |
+            ### SHA Checksums
+            `sha.json` file with checksums for all files in this release.
